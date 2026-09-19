@@ -203,6 +203,12 @@ bool read_leaf_vector(Reader* reader,
     output->clear();
     output->reserve(static_cast<size_t>(count));
     for (uint64_t i = 0; i < count; ++i) {
+        // Upstream serde_chunk_vec encodes each fixed chunk as a byte slice.
+        uint64_t length = 0;
+        if (!reader->read_u64(&length)) return false;
+        if (length != pearl_blake3::CHUNK_LEN) {
+            return reader->fail("leaf_data item is not a 1024-byte BLAKE3 chunk");
+        }
         std::array<uint8_t, pearl_blake3::CHUNK_LEN> value{};
         if (!reader->read_bytes(value.data(), value.size())) return false;
         output->push_back(value);

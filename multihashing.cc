@@ -46,6 +46,7 @@ extern "C" {
 }
 
 #include "c29.h"
+#include "pearl_verify.h"
 
 void (*rx_blake2b_compress)(blake2b_state* S, const uint8_t * block) = rx_blake2b_compress_integer;
 int (*rx_blake2b)(void* out, size_t outlen, const void* in, size_t inlen) = rx_blake2b_default;
@@ -1121,6 +1122,97 @@ NAN_METHOD(etchash) {
 	info.GetReturnValue().Set(returnValue);
 }
 
+NAN_METHOD(pearl_v3) {
+    if (info.Length() != 3) return THROW_ERROR_EXCEPTION(
+        "pearl_v3 expects header (76-byte Buffer), proof (Buffer or base64 string), and target (32-byte Buffer)");
+
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    Local<Object> header;
+    Local<Object> target;
+    if (!RequireBufferArg(isolate, info[0], header)) return THROW_ERROR_EXCEPTION("Argument 1 should be a buffer object");
+    if (Buffer::Length(header) != 76) return THROW_ERROR_EXCEPTION("Argument 1 should be a 76-byte buffer object");
+    if (!RequireBufferArg(isolate, info[2], target)) return THROW_ERROR_EXCEPTION("Argument 3 should be a buffer object");
+    if (Buffer::Length(target) != 32) return THROW_ERROR_EXCEPTION("Argument 3 should be a 32-byte buffer object");
+
+    auto make_result = [&](const pearl_verify::VerifyResult& result) -> v8::Local<v8::Object> {
+        Local<Object> output = Object::New(isolate);
+        auto set = [&](const char* name, Local<Value> value) {
+            output->Set(isolate->GetCurrentContext(), NewString(isolate, name), value).Check();
+        };
+        set("valid", Nan::New(result.valid));
+        set("candidate", Nan::New(result.candidate));
+        if (!result.error.empty()) set("error", NewString(isolate, result.error.c_str()));
+        if (result.valid) {
+            set("jackpot", Nan::CopyBuffer(reinterpret_cast<const char*>(result.jackpot.data()), 32).ToLocalChecked());
+            set("proof_id", Nan::CopyBuffer(reinterpret_cast<const char*>(result.proof_id.data()), 32).ToLocalChecked());
+            Local<Object> config = Object::New(isolate);
+            auto set_config = [&](const char* name, Local<Value> value) {
+                config->Set(isolate->GetCurrentContext(), NewString(isolate, name), value).Check();
+            };
+            set_config("m", Nan::New(result.config.m));
+            set_config("n", Nan::New(result.config.n));
+            set_config("k", Nan::New(result.config.k));
+            set_config("rank", Nan::New(result.config.rank));
+            set_config("experts", Nan::New(result.config.experts));
+            set_config("top_k", Nan::New(result.config.top_k));
+            set_config("expert_index", Nan::New(result.config.expert_index));
+            set_config("t_rows", Nan::New(result.config.t_rows));
+            set_config("t_cols", Nan::New(result.config.t_cols));
+            set_config("adjustment_factor", Nan::New(result.config.adjustment_factor));
+            set_config("moe", Nan::New(result.config.moe));
+            set("config", config);
+        }
+        return output;
+    };
+
+    pearl_verify::VerifyResult result;
+    std::vector<uint8_t> decoded;
+    try {
+        const uint8_t* proof_data = nullptr;
+        size_t proof_length = 0;
+        if (Buffer::HasInstance(info[1])) {
+            Local<Object> proof = info[1].As<Object>();
+            proof_length = Buffer::Length(proof);
+            if (proof_length > pearl_verify::MAX_PROOF_BYTES) {
+                result.error = "proof exceeds the 8 MiB bound";
+                info.GetReturnValue().Set(make_result(result));
+                return;
+            }
+            proof_data = reinterpret_cast<const uint8_t*>(Buffer::Data(proof));
+        } else if (info[1]->IsString()) {
+            const int encoded_length = info[1].As<v8::String>()->Utf8Length(isolate);
+            if (encoded_length <= 0 || static_cast<size_t>(encoded_length) > pearl_verify::MAX_BASE64_CHARS) {
+                result.error = "base64 proof exceeds the bounded V3 range";
+                info.GetReturnValue().Set(make_result(result));
+                return;
+            }
+            Nan::Utf8String encoded(info[1]);
+            if (*encoded == nullptr || !pearl_verify::decode_base64(
+                    *encoded, static_cast<size_t>(encoded.length()), &result.error, &decoded)) {
+                info.GetReturnValue().Set(make_result(result));
+                return;
+            }
+            proof_data = decoded.data();
+            proof_length = decoded.size();
+        } else {
+            return THROW_ERROR_EXCEPTION("Argument 2 should be a buffer or base64 string");
+        }
+
+        pearl_verify::verify_v3(
+            reinterpret_cast<const uint8_t*>(Buffer::Data(header)), Buffer::Length(header),
+            proof_data, proof_length,
+            reinterpret_cast<const uint8_t*>(Buffer::Data(target)), Buffer::Length(target),
+            &result);
+    } catch (const std::exception& exception) {
+        result = pearl_verify::VerifyResult{};
+        result.error = std::string("verification failed closed: ") + exception.what();
+    } catch (...) {
+        result = pearl_verify::VerifyResult{};
+        result.error = "verification failed closed: unexpected exception";
+    }
+    info.GetReturnValue().Set(make_result(result));
+}
+
 
 void init(v8::Local<v8::Object> exports, v8::Local<v8::Value>,
           v8::Local<v8::Context> context, void*) {
@@ -1158,6 +1250,7 @@ void init(v8::Local<v8::Object> exports, v8::Local<v8::Value>,
     SetExport(isolate, exports, "kawpow_light", kawpow_light);
     SetExport(isolate, exports, "ethash", ethash);
     SetExport(isolate, exports, "etchash", etchash);
+    SetExport(isolate, exports, "pearl_v3", pearl_v3);
 }
 
 NODE_MODULE_CONTEXT_AWARE(cryptonight, init)

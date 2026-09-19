@@ -36,6 +36,7 @@ deterministic PoW hashing without shelling out to an external binary. It is used
 - **KangarooTwelve**
 - **Cuckaroo29:** `c29`, `c29s`, `c29v`, `c29b`, `c29i`
 - **KawPow, Ethash, Etchash, Autolykos2**
+- **PearlHash V3:** bounded CPU verification for dense and MoE plain proofs
 
 ## Install
 
@@ -93,6 +94,7 @@ Exact argument patterns and vector-backed examples live in [`tests/stability.js`
 | `etchash(headerHash32, nonce8, height)` | `[Buffer, Buffer]` | Returns `[result, mixHash]`. |
 | `autolykos2_hashes(coinbaseBuffer, height)` | `[Buffer, Buffer]` | JS helper that returns `[hash, blake2b(hash)]`. |
 | `c29*`, `c29_*packed_edges`, `c29_cycle_hash` | `number` or `Buffer` | Verification and packed-edge helpers for Cuckaroo29 variants. |
+| `pearl_v3(header76, proof, target32)` | `object` | Verifies a bounded PearlHash V3 plain proof. `proof` is a `Buffer` or canonical base64 string; `target32` is a full-width little-endian share target. |
 
 ## Testing
 

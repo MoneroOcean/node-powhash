@@ -60,6 +60,8 @@
                 '<!@(uname -m | grep "^x86_64$" >/dev/null && echo "xmrig-override/backend/cpu/platform/BasicCpuInfo.cpp" || echo)',
                 '<!@(uname -m | grep "^x86_64$" >/dev/null || echo "xmrig-override/backend/cpu/platform/BasicCpuInfo_arm.cpp" || echo)',
                 "multihashing.cc",
+                "pearl_blake3.cc",
+                "pearl_verify.cc",
                 "xmrig-override/backend/cpu/Cpu.cpp",
                 "c29b.cc",
                 "c29i.cc",

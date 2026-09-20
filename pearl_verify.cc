@@ -1052,7 +1052,7 @@ Hash make_solution_id(const uint8_t* header, size_t header_length,
     // Every field below has a fixed width, and every variable-length vector is
     // preceded by an explicit u64 count.  The domain prefix keeps this digest
     // separate from all existing Pearl commitments and proof_id values.
-    static const uint8_t DOMAIN[] = {
+    static const uint8_t SOLUTION_ID_DOMAIN[] = {
         'P', 'e', 'a', 'r', 'l', 'H', 'a', 's', 'h',
         ' ', 'V', '3', ' ', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n', ' ', 'i', 'd', ' ', 'v', '1'
     };
@@ -1060,7 +1060,8 @@ Hash make_solution_id(const uint8_t* header, size_t header_length,
     std::vector<uint8_t> tuple;
     tuple.reserve(256 + (proof.a.rows.size() + proof.bt.rows.size() +
                          proof.moe.routing_offsets.size()) * sizeof(uint64_t));
-    tuple.insert(tuple.end(), DOMAIN, DOMAIN + sizeof(DOMAIN));
+    tuple.insert(tuple.end(), SOLUTION_ID_DOMAIN,
+                 SOLUTION_ID_DOMAIN + sizeof(SOLUTION_ID_DOMAIN));
     tuple.insert(tuple.end(), header, header + header_length);
     append_u64(&tuple, proof.m);
     append_u64(&tuple, proof.n);

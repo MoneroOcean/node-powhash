@@ -146,6 +146,21 @@ struct PlainProof {
     bool legacy_dense = false;
 };
 
+struct PreparedProof {
+    PlainProof proof;
+    ConfigInfo config;
+    Hash job_key{};
+    Hash root_a{};
+    Hash root_b{};
+    Hash root_routing{};
+    Hash solution_id{};
+    uint64_t total_b_cols = 0;
+    uint32_t m = 0;
+    uint32_t n = 0;
+    uint32_t k = 0;
+    uint16_t rank = 0;
+};
+
 template <typename T>
 bool start_vector(Reader* reader, uint64_t* count, size_t item_size, const char* label) {
     if (!reader->read_u64(count)) return false;
@@ -1016,26 +1031,82 @@ bool verify_routing(const PlainProof& proof, uint64_t routing_bytes,
     return true;
 }
 
-bool verify_impl(const uint8_t* header, size_t header_length,
-                 const uint8_t* proof_bytes, size_t proof_length,
-                 const uint8_t* target, size_t target_length,
-                 VerifyResult* result) {
-    if (result == nullptr) return false;
-    *result = VerifyResult{};
-    if (header == nullptr || header_length != 76 || target == nullptr || target_length != 32) {
-        result->error = "header must be 76 bytes and target must be 32 bytes";
+void append_u64(std::vector<uint8_t>* output, uint64_t value) {
+    for (unsigned i = 0; i < 8; ++i) {
+        output->push_back(static_cast<uint8_t>(value >> (8 * i)));
+    }
+}
+
+void append_u32(std::vector<uint8_t>* output, uint32_t value) {
+    for (unsigned i = 0; i < 4; ++i) {
+        output->push_back(static_cast<uint8_t>(value >> (8 * i)));
+    }
+}
+
+void append_hash(std::vector<uint8_t>* output, const Hash& value) {
+    output->insert(output->end(), value.begin(), value.end());
+}
+
+Hash make_solution_id(const uint8_t* header, size_t header_length,
+                      const PreparedProof& prepared) {
+    // Every field below has a fixed width, and every variable-length vector is
+    // preceded by an explicit u64 count.  The domain prefix keeps this digest
+    // separate from all existing Pearl commitments and proof_id values.
+    static const uint8_t DOMAIN[] = {
+        'P', 'e', 'a', 'r', 'l', 'H', 'a', 's', 'h',
+        ' ', 'V', '3', ' ', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n', ' ', 'i', 'd', ' ', 'v', '1'
+    };
+    const PlainProof& proof = prepared.proof;
+    std::vector<uint8_t> tuple;
+    tuple.reserve(256 + (proof.a.rows.size() + proof.bt.rows.size() +
+                         proof.moe.routing_offsets.size()) * sizeof(uint64_t));
+    tuple.insert(tuple.end(), DOMAIN, DOMAIN + sizeof(DOMAIN));
+    tuple.insert(tuple.end(), header, header + header_length);
+    append_u64(&tuple, proof.m);
+    append_u64(&tuple, proof.n);
+    append_u64(&tuple, proof.k);
+    append_u64(&tuple, proof.noise_rank);
+    append_hash(&tuple, prepared.root_a);
+    append_hash(&tuple, prepared.root_b);
+    tuple.push_back(proof.has_moe ? 1 : 0);
+
+    append_u64(&tuple, proof.a.rows.size());
+    for (uint64_t row : proof.a.rows) append_u64(&tuple, row);
+    append_u64(&tuple, proof.bt.rows.size());
+    for (uint64_t row : proof.bt.rows) append_u64(&tuple, row);
+
+    if (proof.has_moe) {
+        append_u64(&tuple, proof.moe.experts);
+        append_u64(&tuple, proof.moe.top_k);
+        append_u64(&tuple, proof.moe.expert_index);
+        append_u64(&tuple, proof.moe.routing_offsets.size());
+        for (uint32_t offset : proof.moe.routing_offsets) append_u32(&tuple, offset);
+        append_u64(&tuple, proof.moe.inner_a_rows.size());
+        for (uint64_t row : proof.moe.inner_a_rows) append_u64(&tuple, row);
+        append_hash(&tuple, prepared.root_routing);
+    }
+    return pearl_blake3::hash(tuple);
+}
+
+bool prepare_impl(const uint8_t* header, size_t header_length,
+                  const uint8_t* proof_bytes, size_t proof_length,
+                  PreparedProof* prepared, std::string* error) {
+    if (prepared == nullptr || error == nullptr) return false;
+    *prepared = PreparedProof{};
+    if (header == nullptr || header_length != 76) {
+        *error = "header must be 76 bytes";
         return false;
     }
 
     PlainProof proof;
     bool legacy = false;
-    if (!parse_plain(proof_bytes, proof_length, &proof, &legacy, &result->error)) return false;
+    if (!parse_plain(proof_bytes, proof_length, &proof, &legacy, error)) return false;
     uint32_t m = 0, n = 0, k = 0;
-    if (!u32_from_u64(proof.m, &m, "m exceeds u32", &result->error) ||
-        !u32_from_u64(proof.n, &n, "n exceeds u32", &result->error) ||
-        !u32_from_u64(proof.k, &k, "k exceeds u32", &result->error) ||
+    if (!u32_from_u64(proof.m, &m, "m exceeds u32", error) ||
+        !u32_from_u64(proof.n, &n, "n exceeds u32", error) ||
+        !u32_from_u64(proof.k, &k, "k exceeds u32", error) ||
         proof.noise_rank > UINT16_MAX) {
-        if (result->error.empty()) result->error = "noise rank exceeds u16";
+        if (error->empty()) *error = "noise rank exceeds u16";
         return false;
     }
     const uint16_t rank = static_cast<uint16_t>(proof.noise_rank);
@@ -1048,14 +1119,14 @@ bool verify_impl(const uint8_t* header, size_t header_length,
     std::vector<uint64_t> cols_for_pattern;
     if (proof.has_moe) {
         if (proof.moe.experts > UINT16_MAX || proof.moe.top_k > UINT16_MAX) {
-            result->error = "MoE dimensions exceed u16 wire bounds";
+            *error = "MoE dimensions exceed u16 wire bounds";
             return false;
         }
         experts = static_cast<uint16_t>(proof.moe.experts);
         top_k = static_cast<uint16_t>(proof.moe.top_k);
         expert_index = proof.moe.expert_index;
         if (!checked_mul_u64(proof.n, proof.moe.experts, &total_b_cols64) || total_b_cols64 > UINT32_MAX) {
-            result->error = "MoE total B columns overflow u32";
+            *error = "MoE total B columns overflow u32";
             return false;
         }
         rows_for_pattern = proof.moe.inner_a_rows;
@@ -1063,7 +1134,7 @@ bool verify_impl(const uint8_t* header, size_t header_length,
         cols_for_pattern.reserve(proof.bt.rows.size());
         for (uint64_t index : proof.bt.rows) {
             if (index < column_offset || index - column_offset > UINT32_MAX) {
-                result->error = "MoE B index is below or beyond its expert offset";
+                *error = "MoE B index is below or beyond its expert offset";
                 return false;
             }
             cols_for_pattern.push_back(index - column_offset);
@@ -1073,66 +1144,109 @@ bool verify_impl(const uint8_t* header, size_t header_length,
         cols_for_pattern = proof.bt.rows;
     }
     if (total_b_cols64 > UINT32_MAX) {
-        result->error = "total B columns exceed u32";
+        *error = "total B columns exceed u32";
         return false;
     }
     uint32_t t_rows = 0, t_cols = 0;
     PatternInfo rows_pattern, cols_pattern;
-    if (!pattern_from_list(rows_for_pattern, &rows_pattern, &t_rows, &result->error) ||
-        !pattern_from_list(cols_for_pattern, &cols_pattern, &t_cols, &result->error)) return false;
+    if (!pattern_from_list(rows_for_pattern, &rows_pattern, &t_rows, error) ||
+        !pattern_from_list(cols_for_pattern, &cols_pattern, &t_cols, error)) return false;
     if (!offset_is_valid(rows_pattern, t_rows) || !offset_is_valid(cols_pattern, t_cols)) {
-        result->error = "pattern offset is not valid for its periodic shape";
+        *error = "pattern offset is not valid for its periodic shape";
         return false;
     }
     if (!sanity_check(proof, rows_pattern, t_rows, cols_pattern, t_cols,
-                      static_cast<uint32_t>(total_b_cols64), &result->error)) return false;
+                      static_cast<uint32_t>(total_b_cols64), error)) return false;
 
     uint64_t expected_a = 0, expected_b = 0;
     if (!expected_leaves(proof.m, proof.k, &expected_a) ||
         !expected_leaves(total_b_cols64, proof.k, &expected_b) ||
-        !check_tree_size(proof.a.proof, expected_a, "A", &result->error) ||
-        !check_tree_size(proof.bt.proof, expected_b, "B", &result->error)) return false;
+        !check_tree_size(proof.a.proof, expected_a, "A", error) ||
+        !check_tree_size(proof.bt.proof, expected_b, "B", error)) return false;
     uint64_t routing_bytes = 0;
     if (proof.has_moe) {
         uint64_t routing_raw = 0;
         if (!checked_mul_u64(proof.m, proof.moe.top_k, &routing_raw) ||
             !checked_mul_u64(routing_raw, sizeof(uint32_t), &routing_raw) ||
             !padded_bytes(routing_raw, &routing_bytes)) {
-            result->error = "MoE routing byte length overflow";
+            *error = "MoE routing byte length overflow";
             return false;
         }
         const uint64_t expected_routing = routing_bytes / CHUNK;
-        if (!check_tree_size(proof.moe.routing, expected_routing, "routing", &result->error)) return false;
+        if (!check_tree_size(proof.moe.routing, expected_routing, "routing", error)) return false;
     }
 
     const std::vector<uint8_t> config_bytes = make_config_bytes(
         k, rank, rows_pattern, cols_pattern, proof.has_moe, experts, top_k);
     const Hash job_key = hash_concat(header, header_length, config_bytes.data(), config_bytes.size());
-    Hash root_a{}, root_b{};
-    if (!compute_merkle_root(proof.a.proof, job_key, &root_a, &result->error) ||
+    Hash root_a{}, root_b{}, root_routing{};
+    if (!compute_merkle_root(proof.a.proof, job_key, &root_a, error) ||
         !same_hash(root_a, proof.a.proof.root)) {
-        if (result->error.empty()) result->error = "A Merkle root mismatch";
+        if (error->empty()) *error = "A Merkle root mismatch";
         return false;
     }
-    if (!compute_merkle_root(proof.bt.proof, job_key, &root_b, &result->error) ||
+    if (!compute_merkle_root(proof.bt.proof, job_key, &root_b, error) ||
         !same_hash(root_b, proof.bt.proof.root)) {
-        if (result->error.empty()) result->error = "B Merkle root mismatch";
+        if (error->empty()) *error = "B Merkle root mismatch";
         return false;
     }
     if (proof.has_moe) {
-        Hash root_routing{};
-        if (!compute_merkle_root(proof.moe.routing, job_key, &root_routing, &result->error) ||
+        if (!compute_merkle_root(proof.moe.routing, job_key, &root_routing, error) ||
             !same_hash(root_routing, proof.moe.routing.root)) {
-            if (result->error.empty()) result->error = "routing Merkle root mismatch";
+            if (error->empty()) *error = "routing Merkle root mismatch";
             return false;
         }
-        if (!verify_routing(proof, routing_bytes, &result->error)) return false;
+        if (!verify_routing(proof, routing_bytes, error)) return false;
     }
 
-    const size_t dot = static_cast<size_t>(k - (k % rank));
+    const uint32_t dot = k - (k % rank);
+    uint64_t factor = 0;
+    if (!checked_mul_u64(rows_pattern.count, cols_pattern.count, &factor) ||
+        !checked_mul_u64(factor, static_cast<uint64_t>(dot / rank), &factor) ||
+        !checked_mul_u64(factor, 128, &factor) || factor == 0 || factor > UINT32_MAX) {
+        *error = "difficulty adjustment factor overflow";
+        return false;
+    }
+    const uint32_t adjustment_factor = static_cast<uint32_t>(factor);
+    const ConfigInfo config{m, n, k, rank, experts, top_k, expert_index, t_rows, t_cols,
+                            adjustment_factor, proof.has_moe, rows_pattern, cols_pattern};
+
+    prepared->proof = std::move(proof);
+    prepared->config = config;
+    prepared->job_key = job_key;
+    prepared->root_a = root_a;
+    prepared->root_b = root_b;
+    prepared->root_routing = root_routing;
+    prepared->solution_id = make_solution_id(header, header_length, *prepared);
+    prepared->total_b_cols = total_b_cols64;
+    prepared->m = m;
+    prepared->n = n;
+    prepared->k = k;
+    prepared->rank = rank;
+    prepared->proof.legacy_dense = legacy;
+    return true;
+}
+
+bool verify_impl(const uint8_t* header, size_t header_length,
+                 const uint8_t* proof_bytes, size_t proof_length,
+                 const uint8_t* target, size_t target_length,
+                 VerifyResult* result) {
+    if (result == nullptr) return false;
+    *result = VerifyResult{};
+    if (header == nullptr || header_length != 76 || target == nullptr || target_length != 32) {
+        result->error = "header must be 76 bytes and target must be 32 bytes";
+        return false;
+    }
+
+    PreparedProof prepared;
+    if (!prepare_impl(header, header_length, proof_bytes, proof_length,
+                      &prepared, &result->error)) return false;
+    const PlainProof& proof = prepared.proof;
+    const ConfigInfo& config = prepared.config;
+    const size_t dot = static_cast<size_t>(prepared.k - (prepared.k % prepared.rank));
     uint64_t a_bytes = 0, b_bytes = 0;
     if (!checked_mul_u64(proof.m, proof.k, &a_bytes) ||
-        !checked_mul_u64(total_b_cols64, proof.k, &b_bytes)) {
+        !checked_mul_u64(prepared.total_b_cols, proof.k, &b_bytes)) {
         result->error = "matrix byte length overflow";
         return false;
     }
@@ -1140,8 +1254,8 @@ bool verify_impl(const uint8_t* header, size_t header_length,
     if (!signed_strips(proof.a.proof, proof.a.rows, proof.k, dot, a_bytes, &secret_a, &result->error) ||
         !signed_strips(proof.bt.proof, proof.bt.rows, proof.k, dot, b_bytes, &secret_b, &result->error)) return false;
 
-    Hash bound_a = bind_root(proof.a.proof.root, m, SEED_SALT_A);
-    Hash bound_b = bind_root(proof.bt.proof.root, n, SEED_SALT_B);
+    Hash bound_a = bind_root(prepared.root_a, prepared.m, SEED_SALT_A);
+    Hash bound_b = bind_root(prepared.root_b, prepared.n, SEED_SALT_B);
     Hash hash_activations = bound_a;
     if (proof.has_moe) {
         std::vector<uint8_t> offsets;
@@ -1159,38 +1273,48 @@ bool verify_impl(const uint8_t* header, size_t header_length,
             return false;
         }
         offsets.resize(static_cast<size_t>(padded_offset_bytes), 0);
-        const Hash hash_offsets = pearl_blake3::keyed_hash(offsets, job_key);
-        const Hash hash_routing = hash_concat(proof.moe.routing.root.data(), 32,
+        const Hash hash_offsets = pearl_blake3::keyed_hash(offsets, prepared.job_key);
+        const Hash hash_routing = hash_concat(prepared.root_routing.data(), 32,
                                               hash_offsets.data(), hash_offsets.size());
         hash_activations = hash_concat(bound_a.data(), 32, hash_routing.data(), 32);
     }
-    const Hash b_noise_seed = hash_concat(job_key.data(), 32, bound_b.data(), 32);
+    const Hash b_noise_seed = hash_concat(prepared.job_key.data(), 32, bound_b.data(), 32);
     const Hash a_noise_seed = hash_concat(b_noise_seed.data(), 32, hash_activations.data(), 32);
-    uint64_t factor = 0;
-    if (!checked_mul_u64(rows_pattern.count, cols_pattern.count, &factor) ||
-        !checked_mul_u64(factor, static_cast<uint64_t>(dot / rank), &factor) ||
-        !checked_mul_u64(factor, 128, &factor) || factor == 0 || factor > UINT32_MAX) {
-        result->error = "difficulty adjustment factor overflow";
-        return false;
-    }
-    const uint32_t adjustment_factor = static_cast<uint32_t>(factor);
-    const ConfigInfo config{m, n, k, rank, experts, top_k, expert_index, t_rows, t_cols,
-                            adjustment_factor, proof.has_moe, rows_pattern, cols_pattern};
     if (!compute_jackpot(proof, config, a_noise_seed, b_noise_seed, secret_a, secret_b,
                          &result->jackpot, &result->error)) return false;
 
     Hash target_bound{};
-    const bool target_usable = scale_target(target, factor, &target_bound);
+    const bool target_usable = scale_target(target, config.adjustment_factor, &target_bound);
     result->candidate = target_usable && little_endian_le(result->jackpot, target_bound);
     result->valid = true;
     result->config = config;
+    result->solution_id = prepared.solution_id;
 
     std::vector<uint8_t> canonical;
-    canonical.reserve(header_length + proof_length + (legacy ? 1 : 0));
+    canonical.reserve(header_length + proof_length + (proof.legacy_dense ? 1 : 0));
     canonical.insert(canonical.end(), header, header + header_length);
     canonical.insert(canonical.end(), proof_bytes, proof_bytes + proof_length);
-    if (legacy) canonical.push_back(0);
+    if (proof.legacy_dense) canonical.push_back(0);
     result->proof_id = pearl_blake3::hash(canonical);
+    result->error.clear();
+    return true;
+}
+
+bool solution_id_impl(const uint8_t* header, size_t header_length,
+                      const uint8_t* proof_bytes, size_t proof_length,
+                      VerifyResult* result) {
+    if (result == nullptr) return false;
+    *result = VerifyResult{};
+    if (header == nullptr || header_length != 76) {
+        result->error = "header must be 76 bytes";
+        return false;
+    }
+    PreparedProof prepared;
+    if (!prepare_impl(header, header_length, proof_bytes, proof_length,
+                      &prepared, &result->error)) return false;
+    result->valid = true;
+    result->solution_id = prepared.solution_id;
+    result->config = prepared.config;
     result->error.clear();
     return true;
 }
@@ -1280,6 +1404,23 @@ bool verify_v3(const uint8_t* header, size_t header_length,
     try {
         return verify_impl(header, header_length, proof, proof_length,
                            target, target_length, result);
+    } catch (const std::exception& exception) {
+        *result = VerifyResult{};
+        result->error = std::string("verification failed closed: ") + exception.what();
+        return false;
+    } catch (...) {
+        *result = VerifyResult{};
+        result->error = "verification failed closed: unexpected exception";
+        return false;
+    }
+}
+
+bool pearl_v3_solution_id(const uint8_t* header, size_t header_length,
+                          const uint8_t* proof, size_t proof_length,
+                          VerifyResult* result) {
+    if (result == nullptr) return false;
+    try {
+        return solution_id_impl(header, header_length, proof, proof_length, result);
     } catch (const std::exception& exception) {
         *result = VerifyResult{};
         result->error = std::string("verification failed closed: ") + exception.what();

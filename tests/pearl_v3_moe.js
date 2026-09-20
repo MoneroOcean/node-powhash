@@ -11,6 +11,98 @@ const proof = Buffer.from("gAAAAAAAAABAAAAAAAAAAAAIAAAAAAAAgAAAAAAAAAAIAAAAAAAAA
 // threshold while preserving the candidate=true fixture assertion.
 const target = Buffer.from("2f13b85b2547558134acbfd552b0ffff1fc733d3fa65a66a2d622ddf23c20000", "hex");
 
+function u64Bytes(value) {
+  const encoded = Buffer.alloc(8);
+  encoded.writeBigUInt64LE(BigInt(value));
+  return encoded;
+}
+
+function readU64(bytes, offset) {
+  return bytes.readBigUInt64LE(offset);
+}
+
+function skipFixedVector(bytes, offset, itemSize) {
+  const count = Number(readU64(bytes, offset));
+  return offset + 8 + count * itemSize;
+}
+
+function skipMerkle(bytes, offset) {
+  const leafCount = Number(readU64(bytes, offset));
+  let cursor = offset + 8;
+  for (let i = 0; i < leafCount; i += 1) {
+    const length = Number(readU64(bytes, cursor));
+    cursor += 8 + length;
+  }
+  cursor = skipFixedVector(bytes, cursor, 8);
+  cursor += 8 + 32;
+  return skipFixedVector(bytes, cursor, 32);
+}
+
+function openRedundantRoutingLeaf(bytes) {
+  let offset = 4 * 8;
+  offset = skipMerkle(bytes, offset);
+  offset = skipFixedVector(bytes, offset, 8);
+  offset = skipMerkle(bytes, offset);
+  offset = skipFixedVector(bytes, offset, 8);
+
+  assert.equal(bytes[offset], 1);
+  offset += 1 + 8 + 8 + 2;
+  offset = skipFixedVector(bytes, offset, 4);
+  offset = skipFixedVector(bytes, offset, 8);
+
+  const routingStart = offset;
+  const leafCount = Number(readU64(bytes, offset));
+  assert.equal(leafCount, 1);
+  offset += 8;
+  const leavesStart = offset;
+  for (let i = 0; i < leafCount; i += 1) {
+    const length = Number(readU64(bytes, offset));
+    assert.equal(length, 1024);
+    offset += 8 + length;
+  }
+  const leavesEnd = offset;
+
+  const leafIndexCount = Number(readU64(bytes, offset));
+  assert.equal(leafIndexCount, 1);
+  offset += 8;
+  const indicesStart = offset;
+  assert.equal(readU64(bytes, offset), 0n);
+  offset += leafIndexCount * 8;
+  const indicesEnd = offset;
+
+  const totalOffset = offset;
+  assert.equal(readU64(bytes, offset), 2n);
+  offset += 8 + 32;
+  const siblingCountOffset = offset;
+  const siblingCount = Number(readU64(bytes, offset));
+  assert.equal(siblingCount, 1);
+  offset += 8;
+  const siblingsStart = offset;
+  offset += siblingCount * 32;
+  assert.equal(offset, bytes.length);
+
+  const openedLeaves = Buffer.concat([
+    u64Bytes(leafCount + 1),
+    bytes.subarray(leavesStart, leavesEnd),
+    u64Bytes(1024),
+    Buffer.alloc(1024),
+  ]);
+  const openedIndices = Buffer.concat([
+    u64Bytes(leafIndexCount + 1),
+    bytes.subarray(indicesStart, indicesEnd),
+    u64Bytes(1),
+  ]);
+  const openedSiblings = u64Bytes(siblingCount - 1);
+  return Buffer.concat([
+    bytes.subarray(0, routingStart),
+    openedLeaves,
+    openedIndices,
+    bytes.subarray(totalOffset, siblingCountOffset),
+    openedSiblings,
+    bytes.subarray(siblingsStart + siblingCount * 32),
+  ]);
+}
+
 test("Pearl V3 verifies a MoE proof and exposes routing configuration", () => {
   const result = powhash.pearl_v3(header, proof, target);
   assert.equal(result.valid, true);
@@ -20,4 +112,43 @@ test("Pearl V3 verifies a MoE proof and exposes routing configuration", () => {
     m: 128, n: 64, k: 2048, rank: 128, experts: 8, top_k: 4,
     expert_index: 0, t_rows: 0, t_cols: 0, adjustment_factor: 65536, moe: true,
   });
+  assert.equal(Buffer.isBuffer(result.solution_id), true);
+  assert.equal(result.solution_id.length, 32);
+
+  const identity = powhash.pearl_v3_solution_id(header, proof);
+  assert.equal(identity.valid, true);
+  assert.deepEqual(identity.solution_id, result.solution_id);
+  assert.deepEqual(identity.config, result.config);
+});
+
+test("Pearl V3 accepts an equivalent MoE routing proof with an opened zero leaf", () => {
+  const opened = openRedundantRoutingLeaf(proof);
+  assert.notEqual(opened.compare(proof), 0);
+
+  const original = powhash.pearl_v3(header, proof, target);
+  const alternate = powhash.pearl_v3(header, opened, target);
+  assert.equal(original.valid, true);
+  assert.equal(alternate.valid, true);
+  assert.equal(alternate.candidate, original.candidate);
+  assert.deepEqual(alternate.jackpot, original.jackpot);
+  assert.deepEqual(alternate.config, original.config);
+  assert.deepEqual(alternate.solution_id, original.solution_id);
+  assert.equal(Buffer.isBuffer(original.proof_id), true);
+  assert.equal(Buffer.isBuffer(alternate.proof_id), true);
+  assert.notDeepEqual(alternate.proof_id, original.proof_id);
+
+  const originalIdentity = powhash.pearl_v3_solution_id(header, proof);
+  const alternateIdentity = powhash.pearl_v3_solution_id(header, opened);
+  assert.equal(originalIdentity.valid, true);
+  assert.equal(alternateIdentity.valid, true);
+  assert.deepEqual(alternateIdentity.solution_id, originalIdentity.solution_id);
+});
+
+test("Pearl V3 MoE identity rejects malformed routing commitments", () => {
+  const malformed = Buffer.from(proof);
+  malformed[malformed.length - 32 - 1024] ^= 1;
+  const result = powhash.pearl_v3_solution_id(header, malformed);
+  assert.equal(result.valid, false);
+  assert.equal(typeof result.error, "string");
+  assert.ok(result.error.length > 0);
 });

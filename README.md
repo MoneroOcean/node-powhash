@@ -95,6 +95,7 @@ Exact argument patterns and vector-backed examples live in [`tests/stability.js`
 | `autolykos2_hashes(coinbaseBuffer, height)` | `[Buffer, Buffer]` | JS helper that returns `[hash, blake2b(hash)]`. |
 | `c29*`, `c29_*packed_edges`, `c29_cycle_hash` | `number` or `Buffer` | Verification and packed-edge helpers for Cuckaroo29 variants. |
 | `pearl_v3(header76, proof, target32)` | `object` | Verifies a bounded PearlHash V3 plain proof. `proof` is a `Buffer` or canonical base64 string; `target32` is a full-width little-endian share target. |
+| `pearl_v3_solution_id(header76, proof)` | `object` | Performs the bounded public/commitment checks and returns a domain-separated semantic `solution_id` (32-byte `Buffer`) plus config, without jackpot/GEMM work. |
 
 ## Testing
 

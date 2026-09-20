@@ -23,6 +23,11 @@ test("Pearl V3 verifies a one-leaf MoE routing tree", () => {
     m: 32, n: 64, k: 2048, rank: 128, experts: 4, top_k: 2,
     expert_index: 0, t_rows: 0, t_cols: 0, adjustment_factor: 65536, moe: true,
   });
+
+  const identity = powhash.pearl_v3_solution_id(header, proof);
+  assert.equal(identity.valid, true);
+  assert.deepEqual(identity.solution_id, result.solution_id);
+  assert.deepEqual(identity.config, result.config);
 });
 
 test("Pearl V3 rejects mutation of the one-leaf routing data", () => {

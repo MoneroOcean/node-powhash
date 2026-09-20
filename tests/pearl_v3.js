@@ -35,12 +35,15 @@ function littleEndianValue(value) {
 test("Pearl V3 verifies Buffer/base64 forms and returns stable metadata", () => {
   const fromBuffer = powhash.pearl_v3(header, proof, winningTarget);
   assert.equal(fromBuffer.valid, true);
+  assert.equal(fromBuffer.full, true);
   assert.equal(fromBuffer.candidate, true);
   assert.equal(fromBuffer.jackpot.toString("hex"), jackpotHex);
   assert.equal(Buffer.isBuffer(fromBuffer.proof_id), true);
   assert.equal(fromBuffer.proof_id.length, 32);
-  assert.equal(Buffer.isBuffer(fromBuffer.solution_id), true);
-  assert.equal(fromBuffer.solution_id.length, 32);
+  assert.equal(Buffer.isBuffer(fromBuffer.solution_data), true);
+  assert.ok(fromBuffer.solution_data.length > 100);
+  assert.equal(fromBuffer.solution_data[0], 1);
+  assert.ok(fromBuffer.solution_data.length <= 16 * 1024);
   assert.deepEqual(fromBuffer.config, {
     m: 128, n: 64, k: 2048, rank: 128, experts: 0, top_k: 0,
     expert_index: 0, t_rows: 0, t_cols: 0, adjustment_factor: 65536, moe: false,
@@ -51,41 +54,48 @@ test("Pearl V3 verifies Buffer/base64 forms and returns stable metadata", () => 
   assert.equal(fromBase64.candidate, true);
   assert.deepEqual(fromBase64.jackpot, fromBuffer.jackpot);
   assert.deepEqual(fromBase64.proof_id, fromBuffer.proof_id);
-  assert.deepEqual(fromBase64.solution_id, fromBuffer.solution_id);
+  assert.deepEqual(fromBase64.solution_data, fromBuffer.solution_data);
 
-  const light = powhash.pearl_v3_solution_id(header, proof);
+  const light = powhash.pearl_v3(header, proof, false);
   assert.equal(light.valid, true);
-  assert.deepEqual(light.solution_id, fromBuffer.solution_id);
+  assert.equal(light.full, false);
+  assert.equal(Object.hasOwn(light, "candidate"), false);
+  assert.deepEqual(light.solution_data, fromBuffer.solution_data);
   assert.deepEqual(light.config, fromBuffer.config);
 
-  const lightBase64 = powhash.pearl_v3_solution_id(header, canonicalProofBase64);
+  const lightBase64 = powhash.pearl_v3(header, canonicalProofBase64, false);
   assert.equal(lightBase64.valid, true);
-  assert.deepEqual(lightBase64.solution_id, light.solution_id);
+  assert.deepEqual(lightBase64.solution_data, light.solution_data);
   assert.deepEqual(lightBase64.config, light.config);
 
   const legacyDense = powhash.pearl_v3(header, proof.subarray(0, -1), winningTarget);
   assert.equal(legacyDense.valid, true);
   assert.deepEqual(legacyDense.proof_id, fromBuffer.proof_id);
-  assert.deepEqual(legacyDense.solution_id, fromBuffer.solution_id);
+  assert.deepEqual(legacyDense.solution_data, fromBuffer.solution_data);
 
-  const legacyLight = powhash.pearl_v3_solution_id(header, proof.subarray(0, -1));
+  const legacyLight = powhash.pearl_v3(header, proof.subarray(0, -1), false);
   assert.equal(legacyLight.valid, true);
-  assert.deepEqual(legacyLight.solution_id, light.solution_id);
+  assert.deepEqual(legacyLight.solution_data, light.solution_data);
 });
 
 test("Pearl V3 solution identity binds the header and fails closed", () => {
-  const identity = powhash.pearl_v3_solution_id(header, proof);
+  const identity = powhash.pearl_v3(header, proof, false);
   const otherHeader = Buffer.from(header);
   otherHeader[0] ^= 1;
-  const other = powhash.pearl_v3_solution_id(otherHeader, proof);
+  const other = powhash.pearl_v3(otherHeader, proof, false);
   assert.equal(identity.valid, true);
   assert.equal(typeof other.valid, "boolean");
-  assert.ok(!other.valid || !other.solution_id.equals(identity.solution_id));
+  assert.ok(!other.valid || !other.solution_data.equals(identity.solution_data));
 
-  const malformed = powhash.pearl_v3_solution_id(header, proof.subarray(0, -2));
+  const malformed = powhash.pearl_v3(header, proof.subarray(0, -2), false);
   assert.equal(malformed.valid, false);
+  assert.equal(malformed.full, false);
   assert.equal(typeof malformed.error, "string");
   assert.ok(malformed.error.length > 0);
+
+  const malformedFull = powhash.pearl_v3(header, proof.subarray(0, -2), winningTarget);
+  assert.equal(malformedFull.valid, false);
+  assert.equal(malformedFull.full, true);
 });
 
 test("Pearl V3 does not turn an overflowing share target into an all-winning bound", () => {
@@ -162,6 +172,7 @@ test("Pearl V3 fails closed on malformed and bounded inputs", () => {
   assert.equal(nonCanonical.valid, false);
   assert.equal(nonCanonical.candidate, false);
   assert.throws(() => powhash.pearl_v3(header, proof, Buffer.alloc(31)));
+  assert.throws(() => powhash.pearl_v3(header, proof, true));
 });
 
 test("Pearl V3 tolerates repeated calls and caller Buffer mutation", () => {

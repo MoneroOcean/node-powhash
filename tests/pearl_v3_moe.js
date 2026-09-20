@@ -106,18 +106,20 @@ function openRedundantRoutingLeaf(bytes) {
 test("Pearl V3 verifies a MoE proof and exposes routing configuration", () => {
   const result = powhash.pearl_v3(header, proof, target);
   assert.equal(result.valid, true);
+  assert.equal(result.full, true);
   assert.equal(result.candidate, true);
   assert.equal(result.jackpot.toString("hex"), "46df2e13b85b2547558134acbfd552b0ffff1fc733d3fa65a66a2d622ddf23c2");
   assert.deepEqual(result.config, {
     m: 128, n: 64, k: 2048, rank: 128, experts: 8, top_k: 4,
     expert_index: 0, t_rows: 0, t_cols: 0, adjustment_factor: 65536, moe: true,
   });
-  assert.equal(Buffer.isBuffer(result.solution_id), true);
-  assert.equal(result.solution_id.length, 32);
+  assert.equal(Buffer.isBuffer(result.solution_data), true);
+  assert.ok(result.solution_data.length > 100);
 
-  const identity = powhash.pearl_v3_solution_id(header, proof);
+  const identity = powhash.pearl_v3(header, proof, false);
   assert.equal(identity.valid, true);
-  assert.deepEqual(identity.solution_id, result.solution_id);
+  assert.equal(identity.full, false);
+  assert.deepEqual(identity.solution_data, result.solution_data);
   assert.deepEqual(identity.config, result.config);
 });
 
@@ -132,22 +134,22 @@ test("Pearl V3 accepts an equivalent MoE routing proof with an opened zero leaf"
   assert.equal(alternate.candidate, original.candidate);
   assert.deepEqual(alternate.jackpot, original.jackpot);
   assert.deepEqual(alternate.config, original.config);
-  assert.deepEqual(alternate.solution_id, original.solution_id);
+  assert.deepEqual(alternate.solution_data, original.solution_data);
   assert.equal(Buffer.isBuffer(original.proof_id), true);
   assert.equal(Buffer.isBuffer(alternate.proof_id), true);
   assert.notDeepEqual(alternate.proof_id, original.proof_id);
 
-  const originalIdentity = powhash.pearl_v3_solution_id(header, proof);
-  const alternateIdentity = powhash.pearl_v3_solution_id(header, opened);
+  const originalIdentity = powhash.pearl_v3(header, proof, false);
+  const alternateIdentity = powhash.pearl_v3(header, opened, false);
   assert.equal(originalIdentity.valid, true);
   assert.equal(alternateIdentity.valid, true);
-  assert.deepEqual(alternateIdentity.solution_id, originalIdentity.solution_id);
+  assert.deepEqual(alternateIdentity.solution_data, originalIdentity.solution_data);
 });
 
 test("Pearl V3 MoE identity rejects malformed routing commitments", () => {
   const malformed = Buffer.from(proof);
   malformed[malformed.length - 32 - 1024] ^= 1;
-  const result = powhash.pearl_v3_solution_id(header, malformed);
+  const result = powhash.pearl_v3(header, malformed, false);
   assert.equal(result.valid, false);
   assert.equal(typeof result.error, "string");
   assert.ok(result.error.length > 0);

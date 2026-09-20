@@ -1175,15 +1175,21 @@ NAN_METHOD(etchash) {
 
 NAN_METHOD(pearl_v3) {
     if (info.Length() != 3) return THROW_ERROR_EXCEPTION(
-        "pearl_v3 expects header (76-byte Buffer), proof (Buffer or base64 string), and target (32-byte Buffer)");
+        "pearl_v3 expects header (76-byte Buffer), proof (Buffer or base64 string), and a 32-byte target or false");
 
     v8::Isolate* isolate = v8::Isolate::GetCurrent();
     Local<Object> header;
     Local<Object> target;
     if (!RequireBufferArg(isolate, info[0], header)) return THROW_ERROR_EXCEPTION("Argument 1 should be a buffer object");
     if (Buffer::Length(header) != 76) return THROW_ERROR_EXCEPTION("Argument 1 should be a 76-byte buffer object");
-    if (!RequireBufferArg(isolate, info[2], target)) return THROW_ERROR_EXCEPTION("Argument 3 should be a buffer object");
-    if (Buffer::Length(target) != 32) return THROW_ERROR_EXCEPTION("Argument 3 should be a 32-byte buffer object");
+    const bool full_verify = !info[2]->IsBoolean();
+    if (!full_verify && Nan::To<bool>(info[2]).FromMaybe(true)) {
+        return THROW_ERROR_EXCEPTION("Argument 3 should be a 32-byte target or false");
+    }
+    if (full_verify) {
+        if (!RequireBufferArg(isolate, info[2], target)) return THROW_ERROR_EXCEPTION("Argument 3 should be a 32-byte buffer object or false");
+        if (Buffer::Length(target) != 32) return THROW_ERROR_EXCEPTION("Argument 3 should be a 32-byte buffer object or false");
+    }
 
     auto make_result = [&](const pearl_verify::VerifyResult& result) -> v8::Local<v8::Object> {
         Local<Object> output = Object::New(isolate);
@@ -1191,18 +1197,24 @@ NAN_METHOD(pearl_v3) {
             output->Set(isolate->GetCurrentContext(), NewString(isolate, name), value).Check();
         };
         set("valid", Nan::New(result.valid));
-        set("candidate", Nan::New(result.candidate));
+        set("full", Nan::New(result.full));
+        if (result.full) set("candidate", Nan::New(result.candidate));
         if (!result.error.empty()) set("error", NewString(isolate, result.error.c_str()));
         if (result.valid) {
-            set("jackpot", Nan::CopyBuffer(reinterpret_cast<const char*>(result.jackpot.data()), 32).ToLocalChecked());
-            set("proof_id", Nan::CopyBuffer(reinterpret_cast<const char*>(result.proof_id.data()), 32).ToLocalChecked());
-            set("solution_id", Nan::CopyBuffer(reinterpret_cast<const char*>(result.solution_id.data()), 32).ToLocalChecked());
+            if (result.full) {
+                set("jackpot", Nan::CopyBuffer(reinterpret_cast<const char*>(result.jackpot.data()), 32).ToLocalChecked());
+                set("proof_id", Nan::CopyBuffer(reinterpret_cast<const char*>(result.proof_id.data()), 32).ToLocalChecked());
+            }
+            set("solution_data", Nan::CopyBuffer(
+                reinterpret_cast<const char*>(result.solution_data.data()),
+                static_cast<uint32_t>(result.solution_data.size())).ToLocalChecked());
             set("config", MakePearlConfig(isolate, result.config));
         }
         return output;
     };
 
     pearl_verify::VerifyResult result;
+    result.full = full_verify;
     std::vector<uint8_t> decoded;
     try {
         const uint8_t* proof_data = nullptr;
@@ -1215,11 +1227,17 @@ NAN_METHOD(pearl_v3) {
             return;
         }
 
-        pearl_verify::verify_v3(
-            reinterpret_cast<const uint8_t*>(Buffer::Data(header)), Buffer::Length(header),
-            proof_data, proof_length,
-            reinterpret_cast<const uint8_t*>(Buffer::Data(target)), Buffer::Length(target),
-            &result);
+        if (full_verify) {
+            pearl_verify::verify_v3(
+                reinterpret_cast<const uint8_t*>(Buffer::Data(header)), Buffer::Length(header),
+                proof_data, proof_length,
+                reinterpret_cast<const uint8_t*>(Buffer::Data(target)), Buffer::Length(target),
+                &result);
+        } else {
+            pearl_verify::prepare_v3(
+                reinterpret_cast<const uint8_t*>(Buffer::Data(header)), Buffer::Length(header),
+                proof_data, proof_length, &result);
+        }
     } catch (const std::exception& exception) {
         result = pearl_verify::VerifyResult{};
         result.error = std::string("verification failed closed: ") + exception.what();
@@ -1227,56 +1245,7 @@ NAN_METHOD(pearl_v3) {
         result = pearl_verify::VerifyResult{};
         result.error = "verification failed closed: unexpected exception";
     }
-    info.GetReturnValue().Set(make_result(result));
-}
-
-NAN_METHOD(pearl_v3_solution_id) {
-    if (info.Length() != 2) return THROW_ERROR_EXCEPTION(
-        "pearl_v3_solution_id expects header (76-byte Buffer) and proof (Buffer or base64 string)");
-
-    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-    Local<Object> header;
-    if (!RequireBufferArg(isolate, info[0], header)) return THROW_ERROR_EXCEPTION("Argument 1 should be a buffer object");
-    if (Buffer::Length(header) != 76) return THROW_ERROR_EXCEPTION("Argument 1 should be a 76-byte buffer object");
-
-    auto make_result = [&](const pearl_verify::VerifyResult& result) -> v8::Local<v8::Object> {
-        Local<Object> output = Object::New(isolate);
-        auto set = [&](const char* name, Local<Value> value) {
-            output->Set(isolate->GetCurrentContext(), NewString(isolate, name), value).Check();
-        };
-        set("valid", Nan::New(result.valid));
-        if (!result.error.empty()) set("error", NewString(isolate, result.error.c_str()));
-        if (result.valid) {
-            set("solution_id", Nan::CopyBuffer(
-                reinterpret_cast<const char*>(result.solution_id.data()), 32).ToLocalChecked());
-            set("config", MakePearlConfig(isolate, result.config));
-        }
-        return output;
-    };
-
-    pearl_verify::VerifyResult result;
-    std::vector<uint8_t> decoded;
-    try {
-        const uint8_t* proof_data = nullptr;
-        size_t proof_length = 0;
-        if (!ReadPearlProofArg(isolate, info[1], &decoded, &proof_data, &proof_length, &result.error)) {
-            return THROW_ERROR_EXCEPTION("Argument 2 should be a buffer or base64 string");
-        }
-        if (proof_data == nullptr && !result.error.empty()) {
-            info.GetReturnValue().Set(make_result(result));
-            return;
-        }
-
-        pearl_verify::pearl_v3_solution_id(
-            reinterpret_cast<const uint8_t*>(Buffer::Data(header)), Buffer::Length(header),
-            proof_data, proof_length, &result);
-    } catch (const std::exception& exception) {
-        result = pearl_verify::VerifyResult{};
-        result.error = std::string("verification failed closed: ") + exception.what();
-    } catch (...) {
-        result = pearl_verify::VerifyResult{};
-        result.error = "verification failed closed: unexpected exception";
-    }
+    result.full = full_verify;
     info.GetReturnValue().Set(make_result(result));
 }
 
@@ -1318,7 +1287,6 @@ void init(v8::Local<v8::Object> exports, v8::Local<v8::Value>,
     SetExport(isolate, exports, "ethash", ethash);
     SetExport(isolate, exports, "etchash", etchash);
     SetExport(isolate, exports, "pearl_v3", pearl_v3);
-    SetExport(isolate, exports, "pearl_v3_solution_id", pearl_v3_solution_id);
 }
 
 NODE_MODULE_CONTEXT_AWARE(cryptonight, init)

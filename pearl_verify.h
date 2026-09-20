@@ -48,10 +48,11 @@ struct ConfigInfo {
 
 struct VerifyResult {
     bool valid = false;
+    bool full = false;
     bool candidate = false;
     pearl_blake3::Hash jackpot{};
     pearl_blake3::Hash proof_id{};
-    pearl_blake3::Hash solution_id{};
+    std::vector<uint8_t> solution_data;
     ConfigInfo config;
     std::string error;
 };
@@ -68,13 +69,13 @@ bool verify_v3(const uint8_t* header, size_t header_length,
                const uint8_t* target, size_t target_length,
                VerifyResult* result);
 
-// Verifies the bounded, public/commitment portion of a V3 proof and derives a
-// semantic identity.  This intentionally omits signed-strip extraction and
-// the GEMM/jackpot calculation, but shares all parsing, shape, configuration,
-// tree-size, keyed-root, and MoE routing checks with verify_v3.
-bool pearl_v3_solution_id(const uint8_t* header, size_t header_length,
-                          const uint8_t* proof, size_t proof_length,
-                          VerifyResult* result);
+// Verifies the bounded, public/commitment portion of a V3 proof and returns
+// versioned canonical solution data.  This intentionally omits signed-strip
+// extraction and the GEMM/jackpot calculation, but shares all parsing, shape,
+// configuration, tree-size, keyed-root, and MoE routing checks with verify_v3.
+bool prepare_v3(const uint8_t* header, size_t header_length,
+                const uint8_t* proof, size_t proof_length,
+                VerifyResult* result);
 
 // Strict standard-base64 decoder for the optional JavaScript string form.
 // The output is bounded to MAX_PROOF_BYTES and is cleared on failure.

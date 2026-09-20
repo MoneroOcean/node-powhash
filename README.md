@@ -94,8 +94,7 @@ Exact argument patterns and vector-backed examples live in [`tests/stability.js`
 | `etchash(headerHash32, nonce8, height)` | `[Buffer, Buffer]` | Returns `[result, mixHash]`. |
 | `autolykos2_hashes(coinbaseBuffer, height)` | `[Buffer, Buffer]` | JS helper that returns `[hash, blake2b(hash)]`. |
 | `c29*`, `c29_*packed_edges`, `c29_cycle_hash` | `number` or `Buffer` | Verification and packed-edge helpers for Cuckaroo29 variants. |
-| `pearl_v3(header76, proof, target32)` | `object` | Verifies a bounded PearlHash V3 plain proof. `proof` is a `Buffer` or canonical base64 string; `target32` is a full-width little-endian share target. |
-| `pearl_v3_solution_id(header76, proof)` | `object` | Performs the bounded public/commitment checks and returns a domain-separated semantic `solution_id` (32-byte `Buffer`) plus config, without jackpot/GEMM work. |
+| `pearl_v3(header76, proof, target32OrFalse)` | `object` | With a full-width little-endian `target32`, fully verifies a bounded PearlHash V3 plain proof. With `false`, performs only the shared public/commitment preparation. Both modes return identical versioned `solution_data`; the full result additionally includes jackpot, candidate, and proof ID fields. `proof` is a `Buffer` or canonical base64 string. |
 
 ## Testing
 

@@ -153,7 +153,7 @@ struct PreparedProof {
     Hash root_a{};
     Hash root_b{};
     Hash root_routing{};
-    Hash solution_id{};
+    std::vector<uint8_t> solution_data;
     uint64_t total_b_cols = 0;
     uint32_t m = 0;
     uint32_t n = 0;
@@ -1047,21 +1047,16 @@ void append_hash(std::vector<uint8_t>* output, const Hash& value) {
     output->insert(output->end(), value.begin(), value.end());
 }
 
-Hash make_solution_id(const uint8_t* header, size_t header_length,
-                      const PreparedProof& prepared) {
+std::vector<uint8_t> make_solution_data(const uint8_t* header, size_t header_length,
+                                        const PreparedProof& prepared) {
     // Every field below has a fixed width, and every variable-length vector is
-    // preceded by an explicit u64 count.  The domain prefix keeps this digest
-    // separate from all existing Pearl commitments and proof_id values.
-    static const uint8_t SOLUTION_ID_DOMAIN[] = {
-        'P', 'e', 'a', 'r', 'l', 'H', 'a', 's', 'h',
-        ' ', 'V', '3', ' ', 's', 'o', 'l', 'u', 't', 'i', 'o', 'n', ' ', 'i', 'd', ' ', 'v', '1'
-    };
+    // preceded by an explicit u64 count.  node-blocktemplate applies the
+    // algorithm-specific domain and final 32-byte digest to this descriptor.
     const PlainProof& proof = prepared.proof;
     std::vector<uint8_t> tuple;
     tuple.reserve(256 + (proof.a.rows.size() + proof.bt.rows.size() +
                          proof.moe.routing_offsets.size()) * sizeof(uint64_t));
-    tuple.insert(tuple.end(), SOLUTION_ID_DOMAIN,
-                 SOLUTION_ID_DOMAIN + sizeof(SOLUTION_ID_DOMAIN));
+    tuple.push_back(1);  // descriptor version
     tuple.insert(tuple.end(), header, header + header_length);
     append_u64(&tuple, proof.m);
     append_u64(&tuple, proof.n);
@@ -1086,7 +1081,7 @@ Hash make_solution_id(const uint8_t* header, size_t header_length,
         for (uint64_t row : proof.moe.inner_a_rows) append_u64(&tuple, row);
         append_hash(&tuple, prepared.root_routing);
     }
-    return pearl_blake3::hash(tuple);
+    return tuple;
 }
 
 bool prepare_impl(const uint8_t* header, size_t header_length,
@@ -1218,7 +1213,7 @@ bool prepare_impl(const uint8_t* header, size_t header_length,
     prepared->root_a = root_a;
     prepared->root_b = root_b;
     prepared->root_routing = root_routing;
-    prepared->solution_id = make_solution_id(header, header_length, *prepared);
+    prepared->solution_data = make_solution_data(header, header_length, *prepared);
     prepared->total_b_cols = total_b_cols64;
     prepared->m = m;
     prepared->n = n;
@@ -1234,6 +1229,7 @@ bool verify_impl(const uint8_t* header, size_t header_length,
                  VerifyResult* result) {
     if (result == nullptr) return false;
     *result = VerifyResult{};
+    result->full = true;
     if (header == nullptr || header_length != 76 || target == nullptr || target_length != 32) {
         result->error = "header must be 76 bytes and target must be 32 bytes";
         return false;
@@ -1289,7 +1285,7 @@ bool verify_impl(const uint8_t* header, size_t header_length,
     result->candidate = target_usable && little_endian_le(result->jackpot, target_bound);
     result->valid = true;
     result->config = config;
-    result->solution_id = prepared.solution_id;
+    result->solution_data = prepared.solution_data;
 
     std::vector<uint8_t> canonical;
     canonical.reserve(header_length + proof_length + (proof.legacy_dense ? 1 : 0));
@@ -1301,9 +1297,9 @@ bool verify_impl(const uint8_t* header, size_t header_length,
     return true;
 }
 
-bool solution_id_impl(const uint8_t* header, size_t header_length,
-                      const uint8_t* proof_bytes, size_t proof_length,
-                      VerifyResult* result) {
+bool prepare_result_impl(const uint8_t* header, size_t header_length,
+                         const uint8_t* proof_bytes, size_t proof_length,
+                         VerifyResult* result) {
     if (result == nullptr) return false;
     *result = VerifyResult{};
     if (header == nullptr || header_length != 76) {
@@ -1314,7 +1310,7 @@ bool solution_id_impl(const uint8_t* header, size_t header_length,
     if (!prepare_impl(header, header_length, proof_bytes, proof_length,
                       &prepared, &result->error)) return false;
     result->valid = true;
-    result->solution_id = prepared.solution_id;
+    result->solution_data = prepared.solution_data;
     result->config = prepared.config;
     result->error.clear();
     return true;
@@ -1416,12 +1412,12 @@ bool verify_v3(const uint8_t* header, size_t header_length,
     }
 }
 
-bool pearl_v3_solution_id(const uint8_t* header, size_t header_length,
-                          const uint8_t* proof, size_t proof_length,
-                          VerifyResult* result) {
+bool prepare_v3(const uint8_t* header, size_t header_length,
+                const uint8_t* proof, size_t proof_length,
+                VerifyResult* result) {
     if (result == nullptr) return false;
     try {
-        return solution_id_impl(header, header_length, proof, proof_length, result);
+        return prepare_result_impl(header, header_length, proof, proof_length, result);
     } catch (const std::exception& exception) {
         *result = VerifyResult{};
         result->error = std::string("verification failed closed: ") + exception.what();

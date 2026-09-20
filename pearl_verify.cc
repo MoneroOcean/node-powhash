@@ -349,7 +349,7 @@ bool compute_merkle_root(const Merkle& proof, const Hash& key, Hash* output, std
 
     while (level_length > 2) {
         std::vector<MerkleNode> next;
-        next.reserve((current.size() + 1) / 2 + proof.siblings.size());
+        next.reserve((current.size() + 1) / 2);
         for (size_t i = 0; i < current.size(); ++i) {
             const uint64_t index = current[i].index;
             if ((index & 1u) != 0 && i > 0 && current[i - 1].index == index - 1) continue;

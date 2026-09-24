@@ -79,7 +79,7 @@ struct KawpowEpochAccess {
 };
 
 constexpr size_t KAWPOW_MIN_CACHE_ENTRIES = 1;
-constexpr size_t KAWPOW_MAX_CACHE_ENTRIES = 10;
+constexpr size_t KAWPOW_MAX_CACHE_ENTRIES = 5;
 constexpr int kMaxEthashEpochs = 2048;
 constexpr auto KAWPOW_CACHE_GROW_WINDOW = std::chrono::hours(1);
 std::vector<KawpowCacheEntry> kawpow_caches;
